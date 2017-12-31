@@ -1,60 +1,120 @@
 library(tidyverse)
-DIR <- "C:/Users/mjohn/Desktop/gen3/trax/" #directory of trax file
+library(dplyr)
+library(dbscan)
+DIR <- "C:/Users/mjohn/Desktop/gen3/trax/"
 NUM_WASPS <- 3 #input number of wasps in trax file
-CONE <- 0.9 #angle of chase threshold
-BOX <- 30 #pixel width of box of chase
+CONE <- 0.5 #angle of chase threshold
+BOX <- 70 #pixel width of box of chase
 SPD <- 2 #speed in pixel distance per frame
 #open and read text file and reformats it to a tibble
 setwd(DIR)
-dat <- list.files(pattern="*.txt") %>% map(read.table, header = TRUE) %>% map(as_tibble) %>% map(na.omit)
-nan_dat <- list.files(pattern="*.txt") %>% map(read.table, header = TRUE) %>% map(as_tibble)
+dat <- list.files(pattern="*.txt") %>% 
+  map(read.table, header = TRUE) %>% 
+  map(as_tibble) %>% map(na.omit)
+#computes dx and dy and rad/speed calculations
 dat_rad <- list()
 dat_spd <- list()
-for (i in 1:length(dat)){
-  name <- list.files(pattern="*.txt")[i]
-  dat_rad[[name]] <- transmute(dat[[i]], 
-                rad1 = atan2(Y1[-1]-Y1, X1[-1]-X1),
-                rad2 = atan2(Y2[-1]-Y2, X2[-1]-X2),
-                rad3 = atan2(Y3[-1]-Y3, X3[-1]-X3))
-  dat_spd[[name]] <- transmute(dat[[i]],       
-                spd1 = sqrt(abs(X1[-1]-X1)^2+abs(Y1[-1]-Y1)^2), #For some reason this gives a really high value for the last row, try removing that row
-                spd2 = sqrt(abs(X2[-1]-X2)^2+abs(Y2[-1]-Y2)^2),
-                spd3 = sqrt(abs(X3[-1]-X3)^2+abs(Y3[-1]-Y3)^2))
-}
-chase <- list()
+cat <- list()
+cat <- lapply(seq_along(dat), function(k) {
+  n <- 1:NUM_WASPS
+  x<-n+(2*(n-1))
+  y<-x+1
+  dy <- as.matrix(dat[[k]][-1,y]-dat[[k]][-nrow(dat[[k]]),y])
+  dx <- as.matrix(dat[[k]][-1,x]-dat[[k]][-nrow(dat[[k]]),x])
+  dat_rad[[k]] <- as_tibble(atan2(dy, dx))
+  dat_spd[[k]] <- as_tibble(sqrt(abs(dx^2)+abs(dy^2)))
+  return(cbind(dat_rad[[k]],dat_spd[[k]]))
+})
+dat_rad <- lapply(cat, function(x) {x[,1:NUM_WASPS]})
+dat_spd <- lapply(cat, function(x) {x[,(NUM_WASPS+1):ncol(x)]})
+#Ensures parameters are met
+chase <- vector('list', length(dat))
 for (i in 1:length(dat)){
   combn_index <- combn(1:NUM_WASPS,2)
-  name <- list.files(pattern="*.txt")[i]
-  chase[[name]] <- apply(combn_index, 2, function(x) {
+  chase[[i]] <- apply(combn_index, 2, function(x) {
     x1<-x[1]+(2*(x[1]-1))
-    y1<-x1+1
+    y1<-x1+1  
     x2<-x[2]+(2*(x[2]-1))
     y2<-x2+1
-    ifelse(abs(dat_rad[[i]][x[1]] - dat_rad[[i]][x[2]]) < CONE & 
-             abs(dat[[i]][x1]-dat[[i]][x2]) < BOX &
-             abs(dat[[i]][y1]-dat[[i]][y2]) < BOX &
-             dat_spd[[i]][x[1]] > SPD &
-             dat_spd[[i]][x[2]] > SPD, TRUE, FALSE)
+    p1<-x[1]*3
+    p2<-x[2]*3
+    f1 <- mutate(dat[[i]][-1,], idx = 2:nrow(dat[[i]])) %>%
+      filter(
+        abs(dat_rad[[i]][x[1]] - dat_rad[[i]][x[2]]) < CONE &
+          dat_spd[[i]][x[1]] > SPD &
+          dat_spd[[i]][x[2]] > SPD &
+          abs(as.matrix(dat[[i]])[-1,x1] - as.matrix(dat[[i]])[-1,x2]) < BOX &
+          abs(as.matrix(dat[[i]])[-1,y1] - as.matrix(dat[[i]])[-1,y2]) < BOX) %>%
+      select(idx,x1,y1,p1,x2,y2,p2)
   })
-  colnames(chase[[name]]) <- c(paste0(combn_index[1,1], "and", combn_index[2,1], sep=""), paste0(combn_index[1,2], "and", combn_index[2,2], sep=""), paste0(combn_index[1,3], "and", combn_index[2,3], sep=""))
+}
+#clusters
+cluster <- list()
+for (k in seq_along(chase)){ 
+  for (kk in seq_along(chase[[k]])){
+    idx <- chase[[k]][[kk]][1]
+    chase.y <- dat_spd[[k]][as.matrix(idx), kk]
+    if (nrow(idx)!=0){
+      t <- as.data.frame(idx, chase.y)
+      name <- list.files(pattern="*.txt")[k]
+      cluster[[name]][[kk]] <-dbscan(as.matrix(t), eps = 25, minPts = 15, borderPoints = T)["cluster"]
+    } else {
+      name <- list.files(pattern="*.txt")[k]
+      cluster[[name]][[kk]] <- NA
+    }
+    #name <- list.files(pattern="*.txt")[k]
+    #scan[[name]][[kk]] <- as.matrix(cbind(idx, chase.y))
+  }
+}
+#master data frame with location, cluster, and prob
+master <- list()
+for (k in seq_along(chase)){
+  for (kk in seq_along(chase[[k]])){
+    if (nrow(chase[[k]][[kk]])!=0){
+      name <- list.files(pattern="*.txt")[k]
+      master[[name]][[kk]] <- cbind(cluster[[k]][[kk]], chase[[k]][[kk]])
+    }
+  }
+}
+#graph for verification
+library(ggplot2)
+ggplot(data = master[[3]][[3]]) +
+  geom_point(mapping = aes(x=X2, y=Y2, color = "red")) +
+  geom_point(mapping = aes(x=X3, y=Y3, color = "blue")) +
+  facet_wrap(~cluster)
+#computer distances
+grp <- vector('list', length(master))
+for (k in seq_along(master)){
+  for (kk in seq_along(master[[k]])){
+    if(is.null(master[[k]][[kk]])){
+      NULL
+    } else {
+      grp[[k]][[kk]] <- split(master[[k]][[kk]], master[[k]][[kk]][1])
+    }
+  }
 }
 
-lapply(chase, summary)
-lapply(chase, function(x) length(which(x[,1]==TRUE))) #1and2
-lapply(chase, function(x) length(which(x[,2]==TRUE))) #1and3
-lapply(chase, function(x) length(which(x[,3]==TRUE))) #2and3
-which(chase$ma_choice1.txt[,3]==TRUE)+300
+distance <- vector('list', length(grp))
+for (i in seq_along(grp)){
+  for (ii in seq_along(grp[[i]])){
+    if (!is.null(grp[[i]][[ii]])){
+      distance[[i]][[ii]] <- vector('list', length(grp[[i]]))
+      for (iii in seq_along(grp[[i]][[ii]])){
+        f1 <- grp[[i]][[ii]][[iii]]
+        w1 <- f1[,3:4]
+        w2 <- f1[,6:7]
+        c1 <- abs(w1-w2)^2
+        c2 <- sum(sqrt(c1[,1]+c1[,2]))
+        name <- list.files(pattern="*.txt")[i]
+        distance[[i]][[ii]][[iii]] <- c2
+      }
+    } else {NULL}
+  }
+}
+library(reshape2)
+melt(unlist(distance))
 
 
-library(ggplot2)
-plot1 <- filter(dat[[1]], chase$ma_choice1.txt[,3]==1)
-plot2 <- filter(dat[[1]], chase$ma_choice1.txt[,3]==1)
-ggplot(plot1, aes(X2,Y2)) +
-  geom_point(size=1, color='red')+
-  geom_point(data = plot2, aes(X3,Y3), size=1,color='blue')
-
-
-#plot(dat_rad$experiment_1$X1,dat_rad$experiment_1$Y1 , type="l", asp = 1)
-#length <- 0.2
-#arrows(dat_rad$experiment_1$X1, dat_rad$experiment_1$Y1, x1=dat_rad$experiment_1$X1+length*cos(dat_rad$experiment_1$rad1), y1=dat_rad$experiment_1$Y1+length*sin((dat_rad$experiment_1$rad1)), 
-#       length=0.05, col="Gray")
+#density plot of distances
+den <- as.data.frame(melt(unlist(distance)))
+ggplot(den, aes(x=value)) + geom_density()
